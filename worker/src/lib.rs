@@ -480,29 +480,23 @@ mod tests {
     use std::mem;
     use std::ops;
     use std::ptr;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
 
     // structure to test drooping issue
     struct HasDrop {
-        drop_count: u32,
-        drop_limit: u32,
+        drop_count: Arc<AtomicU32>,
     }
 
     impl HasDrop {
-        fn new(val: u32) -> Self {
-            Self {
-                drop_count: 0,
-                drop_limit: val,
-            }
+        fn new(val: Arc<AtomicU32>) -> Self {
+            Self { drop_count: val }
         }
     }
 
     impl ops::Drop for HasDrop {
         fn drop(&mut self) {
-            if self.drop_count >= self.drop_limit {
-                panic!("Dropped more than {} time", self.drop_limit);
-            } else {
-                self.drop_count += 1;
-            }
+            self.drop_count.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -588,7 +582,8 @@ mod tests {
 
     #[test]
     fn schedule_must_not_drop() {
-        let hd = HasDrop::new(0);
+        let ctr = Arc::new(AtomicU32::new(0));
+        let hd = HasDrop::new(ctr.clone());
         let internal = lv2_sys::LV2_Worker_Schedule {
             handle: ptr::null_mut(),
             schedule_work: Some(extern_schedule),
@@ -598,12 +593,13 @@ mod tests {
             phantom: PhantomData::<*const TestDropWorker>,
         };
         let _ = schedule.schedule_work(hd);
+        assert_eq!(ctr.load(Ordering::Relaxed), 0);
     }
 
     #[test]
-    #[should_panic(expected = "Dropped")]
     fn schedule_must_enable_drop_on_error() {
-        let hd = HasDrop::new(0);
+        let ctr = Arc::new(AtomicU32::new(0));
+        let hd = HasDrop::new(ctr.clone());
         let internal = lv2_sys::LV2_Worker_Schedule {
             handle: ptr::null_mut(),
             schedule_work: Some(faulty_schedule),
@@ -613,35 +609,39 @@ mod tests {
             phantom: PhantomData::<*const TestDropWorker>,
         };
         let _ = schedule.schedule_work(hd);
+        assert_eq!(ctr.load(Ordering::Relaxed), 1);
     }
 
     #[test]
     fn respond_must_not_drop() {
-        let hd = HasDrop::new(0);
+        let ctr = Arc::new(AtomicU32::new(0));
+        let hd = HasDrop::new(ctr.clone());
         let respond = ResponseHandler {
             response_function: Some(extern_respond),
             respond_handle: ptr::null_mut(),
             phantom: PhantomData::<TestDropWorker>,
         };
         let _ = respond.respond(hd);
+        assert_eq!(ctr.load(Ordering::Relaxed), 0);
     }
 
     #[test]
-    #[should_panic(expected = "Dropped")]
     fn respond_must_enable_drop_on_error() {
-        let hd = HasDrop::new(0);
+        let ctr = Arc::new(AtomicU32::new(0));
+        let hd = HasDrop::new(ctr.clone());
         let respond = ResponseHandler {
             response_function: Some(faulty_respond),
             respond_handle: ptr::null_mut(),
             phantom: PhantomData::<TestDropWorker>,
         };
         let _ = respond.respond(hd);
+        assert_eq!(ctr.load(Ordering::Relaxed), 1);
     }
 
     #[test]
-    #[should_panic(expected = "Dropped")]
-    fn extern_work_should_drop() {
-        let hd = mem::ManuallyDrop::new(HasDrop::new(0));
+    fn extern_work_should_drop_once() {
+        let ctr = Arc::new(AtomicU32::new(0));
+        let hd = mem::ManuallyDrop::new(HasDrop::new(ctr.clone()));
         let ptr_hd = &hd as *const _ as *const c_void;
         let size = mem::size_of_val(&hd) as u32;
         let mut tdw = TestDropWorker {};
@@ -657,32 +657,13 @@ mod tests {
                 ptr_hd,
             );
         }
+        assert_eq!(ctr.load(Ordering::Relaxed), 1);
     }
 
     #[test]
-    fn extern_work_should_not_drop_twice() {
-        let hd = mem::ManuallyDrop::new(HasDrop::new(1));
-        let ptr_hd = &hd as *const _ as *const c_void;
-        let size = mem::size_of_val(&hd) as u32;
-        let mut tdw = TestDropWorker {};
-
-        let ptr_tdw = &mut tdw as *mut _ as *mut c_void;
-        //trash trick i use Plugin ptr insteas of Pluginstance ptr
-        unsafe {
-            WorkerDescriptor::<TestDropWorker>::extern_work(
-                ptr_tdw,
-                Some(extern_respond),
-                ptr::null_mut(),
-                size,
-                ptr_hd,
-            );
-        }
-    }
-
-    #[test]
-    #[should_panic(expected = "Dropped")]
-    fn extern_work_response_should_drop() {
-        let hd = mem::ManuallyDrop::new(HasDrop::new(0));
+    fn extern_work_response_should_drop_once() {
+        let ctr = Arc::new(AtomicU32::new(0));
+        let hd = mem::ManuallyDrop::new(HasDrop::new(ctr.clone()));
         let ptr_hd = &hd as *const _ as *const c_void;
         let size = mem::size_of_val(&hd) as u32;
         let mut tdw = TestDropWorker {};
@@ -692,19 +673,6 @@ mod tests {
         unsafe {
             WorkerDescriptor::<TestDropWorker>::extern_work_response(ptr_tdw, size, ptr_hd);
         }
-    }
-
-    #[test]
-    fn extern_work_response_should_not_drop_twice() {
-        let hd = mem::ManuallyDrop::new(HasDrop::new(1));
-        let ptr_hd = &hd as *const _ as *const c_void;
-        let size = mem::size_of_val(&hd) as u32;
-        let mut tdw = TestDropWorker {};
-
-        let ptr_tdw = &mut tdw as *mut _ as *mut c_void;
-        //trash trick i use Plugin ptr insteas of Pluginstance ptr
-        unsafe {
-            WorkerDescriptor::<TestDropWorker>::extern_work_response(ptr_tdw, size, ptr_hd);
-        }
+        assert_eq!(ctr.load(Ordering::Relaxed), 1);
     }
 }
